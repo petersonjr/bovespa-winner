@@ -63,8 +63,11 @@ def populate_shares(year):
     shares = fundamentus.shares(year)
   
   shares = shares[shares['Cotação'] > 0]
-  # shares = shares[shares['Liquidez 2 meses'] > 500]
+  
   shares['Ranking (Graham)'] = 0
+  shares['Ranking (Bazin)'] = 0
+  shares['Ranking (Sum)'] = 0
+  shares['Ranking (Final)'] = 0
   
   fill_infos(shares)
   
@@ -102,9 +105,13 @@ def fill_infos_by_ticker(ticker, opener):
     'earnings_stability': False,
     'earnings_growth': False,
     'lpa_growth': False,
-    'dividends_stability': False
+    'dividends_stability': False,
+    'ultimos_dy': 0.0,
+    'constante': False,
+    'crescente': False,
+    'healthy_payout': False
   }
-  
+
   # Fetching Lucro Liquido
   url = f'https://api-analitica.sunoresearch.com.br/api/Statement/GetStatementResultsReportByTicker?type=y&ticker={ticker}&period=999'
   with opener.open(url) as link:
@@ -145,24 +152,38 @@ def fill_infos_by_ticker(ticker, opener):
   # Only consider company indicators before the current_year (robust solution for backtesting purposes)
   company_indicators = [ci for ci in company_indicators if ci['year'] < current_year]
   
-  last_dpas = [fundament['dpa'] for fundament in company_indicators]
-  last_lpas = [fundament['lpa'] for fundament in company_indicators]
+  last_dpas = [fundament['dpa'] for fundament in company_indicators] # Graham
+  last_lpas = [fundament['lpa'] for fundament in company_indicators] # Graham
+  last_payouts = [fundament['payout'] for fundament in company_indicators] # Bazin
+  last_divYields = [fundament['divYeld'] for fundament in company_indicators] # Bazin
   
+  # Graham
   if (len(last_lpas[:10]) > 0):
     infos[ticker]['lpa_growth'] = (sum(last_lpas[:3]) / 3) >= (sum(last_lpas[-3:]) / 3)
   
   if (len(last_dpas[:10]) > 0):
     infos[ticker]['dividends_stability'] = all(last_dpas[:10][i] > 0 for i in range(len(last_dpas[:10])))
+  
+  # Bazin
+  if (len(last_divYields[:5]) > 0):
+    infos[ticker]['ultimos_dy'] = (sum(last_divYields[:5]) / len(last_divYields[:5]))
+  
+  if (len(last_dpas[:5]) > 0):
+    infos[ticker]['constante'] = all(last_dpas[:5][i] > 0 for i in range(len(last_dpas[:5])))
+    infos[ticker]['crescente'] = all(last_dpas[:5][i] >= last_dpas[:5][i+1] for i in range(len(last_dpas[:5])-1))
+  
+  if (len(last_divYields[:5]) > 0):
+    infos[ticker]['healthy_payout'] = all((last_payouts[:5][i] > 0) & (last_payouts[:5][i] < 1) for i in range(len(last_payouts[:5])))
 
 def add_ratings(shares):
-  add_graham_columns(shares)
+  add_graham_bazin_columns(shares)
   fill_fair_price(shares)
   fill_score(shares)
   fill_score_explanation(shares)
   return fill_special_infos(shares)
 
 # Inicializa os índices
-def add_graham_columns(shares):
+def add_graham_bazin_columns(shares):
   shares['Preço Justo (Graham)'] = 0
   shares['Graham Score'] = 0
   shares['Preço Justo (Graham) / Cotação'] = 0
@@ -171,6 +192,14 @@ def add_graham_columns(shares):
   shares['Lucros Crescentes nos Ultimos 10 Anos'] = False
   shares['LPA atual > 1.33 * LPA 10 anos atrás'] = False
   shares['Dividendos Positivos nos Ultimos 10 Anos'] = False
+  shares['Bazin Score'] = Decimal(0)
+  shares['Preço Justo (Bazin)'] = shares['Dividend Yield'] * 100 * Decimal(16.67)
+  shares['Preço Justo (Bazin) / Cotação'] = shares['Preço Justo (Bazin)'] / shares['Cotação']
+  shares['Media de Dividend Yield dos Últimos 5 anos'] = Decimal(0.0)
+  shares['Dividendos > 5% na média dos últimos 5 anos'] = False
+  shares['Dividendos Constantes Ultimos 5 Anos'] = False
+  shares['Dividendos Crescentes Ultimos 5 Anos'] = False
+  shares['Payout Saudavel nos Ultimos 5 Anos'] = False
 
 # Benjamin Graham elaborou a seguinte fórmula para calcular o Valor Intríseco (Preço Justo (Graham)):
 # => sqrt(22.5 * VPA * LPA)
@@ -192,6 +221,9 @@ def fill_score(shares):
   shares['Graham Score'] += (shares['Liquidez Corrente'] > 1.5).astype(int)
   shares['Graham Score'] += (shares['Dívida Bruta/Patrimônio'] < 0.5).astype(int)
   shares['Graham Score'] += (shares['Patrimônio Líquido'] > 2000000000).astype(int)
+  shares['Bazin Score'] += (shares['Preço Justo (Bazin)'] > Decimal(1.5) * shares['Cotação']).astype(int)
+  shares['Bazin Score'] += (shares['Dividend Yield'] > 0.06).astype(int)
+  shares['Bazin Score'] += ((shares['Dívida Bruta/Patrimônio']).astype(float) < 0.5).astype(int)
 
 # Mostra quais filtros a ação passou para pontuar seu Score
 def fill_score_explanation(shares):
@@ -204,6 +236,9 @@ def fill_score_explanation(shares):
   shares['Liquidez Corrente > 1.5'] = shares['Liquidez Corrente'] > 1.5
   shares['Dívida Bruta/Patrimônio < 0.5'] = shares['Dívida Bruta/Patrimônio'] < 0.5
   shares['Patrimônio Líquido > 2 Bilhões'] = shares['Patrimônio Líquido'] > 2000000000
+  shares['Preço Justo (Bazin) > 1.5 * Cotação'] = shares['Preço Justo (Bazin)'] > Decimal(1.5) * shares['Cotação']
+  shares['Dividend Yield > 0.06'] = shares['Dividend Yield'] > 0.06
+  shares['Dívida Bruta/Patrimônio < 0.5'] = (shares['Dívida Bruta/Patrimônio']).astype(float) < 0.5 # https://www.investimentonabolsa.com/2015/07/saiba-analisar-divida-das-empresas.html https://www.sunoresearch.com.br/artigos/5-indicadores-para-avaliar-solidez-de-uma-empresa/
 
 def fill_special_infos(shares):
   for index in range(len(shares)):
@@ -218,11 +253,20 @@ def fill_special_infos(shares):
     shares['LPA atual > 1.33 * LPA 10 anos atrás'][index] = infos[ticker]['lpa_growth']
     shares['Graham Score'][index] += int(infos[ticker]['dividends_stability'])
     shares['Dividendos Positivos nos Ultimos 10 Anos'][index] = infos[ticker]['dividends_stability']
+    shares['Media de Dividend Yield dos Últimos 5 anos'][index] = infos[ticker]['ultimos_dy']
+    shares['Bazin Score'][index] += int(infos[ticker]['ultimos_dy'] > 0.05)
+    shares['Dividendos > 5% na média dos últimos 5 anos'][index] = infos[ticker]['ultimos_dy'] > 0.05
+    shares['Bazin Score'][index] += int(infos[ticker]['constante'])
+    shares['Dividendos Constantes Ultimos 5 Anos'][index] = infos[ticker]['constante']
+    shares['Bazin Score'][index] += int(infos[ticker]['crescente'])
+    shares['Dividendos Crescentes Ultimos 5 Anos'][index] = infos[ticker]['crescente']
+    shares['Bazin Score'][index] += int(infos[ticker]['healthy_payout'])
+    shares['Payout Saudavel nos Ultimos 5 Anos'][index] = infos[ticker]['healthy_payout']
   return shares
 
 # Reordena a tabela para mostrar a Cotação, o Valor Intríseco e o Graham Score como primeiras colunass
 def reorder_columns(shares):
-  columns = ['Ranking (Graham)', 'Cotação', 'Preço Justo (Graham)', 'Graham Score', 'Preço Justo (Graham) / Cotação']
+  columns = ['Ranking (Final)', 'Ranking (Graham)', 'Ranking (Bazin)', 'Ranking (Sum)', 'Cotação', 'Preço Justo (Graham)', 'Preço Justo (Bazin)', 'Graham Score', 'Bazin Score', 'Preço Justo (Graham) / Cotação', 'Preço Justo (Bazin) / Cotação', 'Media de Dividend Yield dos Últimos 5 anos', 'Dividend Yield']
   return shares[columns + [col for col in shares.columns if col not in tuple(columns)]]
 
 # Get the current_year integer value, for example: 2020
@@ -233,7 +277,7 @@ def current_year():
 def copy(shares):
   subprocess.run('pbcopy', universal_newlines=True, input=shares.to_markdown())
 
-# python3 graham.py "{ 'year': 2015 }"
+# python3 all.py "{ 'year': 2015 }"
 if __name__ == '__main__':  
   # Opening these URLs to automatically allow this API to receive more requests from local IP
   browser.open('https://api-analitica.sunoresearch.com.br/api/Statement/GetStatementResultsReportByTicker?type=y&ticker=TRPL4&period=999')
@@ -246,8 +290,14 @@ if __name__ == '__main__':
   shares = populate_shares(year)
   
   shares.sort_values(by=['Graham Score', 'Preço Justo (Graham) / Cotação'], ascending=[False, False], inplace=True)
-  
   shares['Ranking (Graham)'] = range(1, len(shares) + 1)
+  
+  shares.sort_values(by=['Bazin Score', 'Media de Dividend Yield dos Últimos 5 anos'], ascending=[False, False], inplace=True)
+  shares['Ranking (Bazin)'] = range(1, len(shares) + 1)
+  
+  shares['Ranking (Sum)'] = shares['Ranking (Graham)'] + shares['Ranking (Bazin)']
+  shares.sort_values(by=['Ranking (Sum)', 'Preço Justo (Graham) / Cotação'], ascending=[True, False], inplace=True)
+  shares['Ranking (Final)'] = range(1, len(shares) + 1)
   
   print(shares)
   copy(shares)
